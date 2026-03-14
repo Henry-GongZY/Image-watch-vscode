@@ -538,6 +538,9 @@ body{
 /* Canvas transform wrapper */
 .canvas-wrap{position:absolute;top:0;left:0;transform-origin:0 0;will-change:transform}
 canvas.preview-cv{display:block;image-rendering:pixelated;image-rendering:-moz-crisp-edges}
+canvas.pixel-overlay-cv{
+  position:absolute;top:0;left:0;pointer-events:none;
+}
 
 /* Zoom label */
 .zoom-lbl{
@@ -611,6 +614,8 @@ canvas.preview-cv{display:block;image-rendering:pixelated;image-rendering:-moz-c
     <div class="canvas-wrap" id="canvasWrap" style="display:none">
       <canvas class="preview-cv" id="previewCv"></canvas>
     </div>
+    <!-- Pixel overlay is NOT inside canvas-wrap: it renders in screen space, not scaled -->
+    <canvas class="pixel-overlay-cv" id="pixelOverlayCv" style="display:none"></canvas>
     <div class="zoom-lbl"  id="zoomLbl"  style="display:none"></div>
     <div class="pixel-bar" id="pixelBar" style="display:none"></div>
   </div>
@@ -636,14 +641,18 @@ const decoded = new Map();
 // Preview pan/zoom state
 const pv = { scale:1, ox:0, oy:0, dragging:false, lx:0, ly:0, loaded:false };
 
+// When scale >= this, show pixel-level grid with channel values in each cell
+const PIXEL_VIEW_THRESHOLD = 10;
+
 // ── DOM refs ───────────────────────────────────────────────────────────────
-const sidebar      = document.getElementById('sidebar');
-const imgList      = document.getElementById('imgList');
-const previewPane  = document.getElementById('previewPane');
-const previewEmpty = document.getElementById('previewEmpty');
-const canvasWrap   = document.getElementById('canvasWrap');
-const previewCv    = document.getElementById('previewCv');
-const zoomLbl      = document.getElementById('zoomLbl');
+const sidebar        = document.getElementById('sidebar');
+const imgList        = document.getElementById('imgList');
+const previewPane    = document.getElementById('previewPane');
+const previewEmpty   = document.getElementById('previewEmpty');
+const canvasWrap     = document.getElementById('canvasWrap');
+const previewCv      = document.getElementById('previewCv');
+const pixelOverlayCv = document.getElementById('pixelOverlayCv');
+const zoomLbl        = document.getElementById('zoomLbl');
 const pixelBar     = document.getElementById('pixelBar');
 const statusTxt    = document.getElementById('statusTxt');
 const tooltip      = document.getElementById('tooltip');
@@ -829,10 +838,11 @@ function selectImage(id) {
 }
 
 function clearPreview() {
-  previewEmpty.style.display = 'flex';
-  canvasWrap.style.display   = 'none';
-  zoomLbl.style.display      = 'none';
-  pixelBar.style.display     = 'none';
+  previewEmpty.style.display    = 'flex';
+  canvasWrap.style.display      = 'none';
+  zoomLbl.style.display         = 'none';
+  pixelBar.style.display        = 'none';
+  pixelOverlayCv.style.display  = 'none';
   pv.loaded = false;
 }
 
@@ -853,6 +863,7 @@ function renderPreview(imgData) {
     pv.loaded = true;
     fitPreview(w, h);
     updateZoomLabel();
+    updatePixelOverlay();
   }
 
   if (decoded.has(imgData.id)) {
@@ -896,6 +907,98 @@ function updateZoomLabel() {
   zoomLbl.textContent = pv.scale.toFixed(2) + 'x';
 }
 
+// ── Pixel-level overlay (grid + multi-channel values per cell) ──────────────
+function updatePixelOverlay() {
+  if (!pixelOverlayCv || !pv.loaded || previewCv.width === 0 || previewCv.height === 0) return;
+
+  const pw = previewPane.clientWidth || 400, ph = previewPane.clientHeight || 300;
+
+  if (pv.scale < PIXEL_VIEW_THRESHOLD) {
+    pixelOverlayCv.style.display = 'none';
+    return;
+  }
+
+  // Overlay canvas lives in preview-pane coordinates (screen space), NOT inside canvas-wrap.
+  // This means we draw full-integer pixel cells and avoid any CSS-scale blending artifacts.
+  pixelOverlayCv.width  = pw;
+  pixelOverlayCv.height = ph;
+  pixelOverlayCv.style.display = 'block';
+
+  const ctx = pixelOverlayCv.getContext('2d');
+  ctx.clearRect(0, 0, pw, ph);
+
+  const iw = previewCv.width, ih = previewCv.height;
+  const imgCtx = previewCv.getContext('2d');
+
+  // Visible pixel range in image coordinates
+  const x0 = Math.max(0, Math.floor(-pv.ox / pv.scale));
+  const y0 = Math.max(0, Math.floor(-pv.oy / pv.scale));
+  const x1 = Math.min(iw, Math.ceil((pw - pv.ox) / pv.scale));
+  const y1 = Math.min(ih, Math.ceil((ph - pv.oy) / pv.scale));
+
+  const img = images.find(i => i.id === selectedId);
+  const channels = img && !img.isFile ? img.channels : 3;
+
+  // Read image data once for the visible region
+  const regionW = x1 - x0, regionH = y1 - y0;
+  if (regionW <= 0 || regionH <= 0) return;
+  const imageData = imgCtx.getImageData(x0, y0, regionW, regionH);
+  const data = imageData.data;
+
+  const cellSize = pv.scale; // e.g. 11.55 px per pixel cell on screen
+
+  ctx.textBaseline = 'top';
+
+  for (let iy = 0; iy < regionH; iy++) {
+    for (let ix = 0; ix < regionW; ix++) {
+      const srcIdx = (iy * regionW + ix) << 2;
+      // Canvas stores RGB (BGR->RGB already done by fillRgba)
+      const r = data[srcIdx], g = data[srcIdx + 1], b = data[srcIdx + 2], a = data[srcIdx + 3];
+
+      // Screen coordinates of this cell (integer boundaries → no blending)
+      const sx = Math.round((x0 + ix) * pv.scale + pv.ox);
+      const sy = Math.round((y0 + iy) * pv.scale + pv.oy);
+      const sw = Math.round(cellSize);
+      const sh = Math.round(cellSize);
+
+      // Skip cells outside screen
+      if (sx + sw < 0 || sy + sh < 0 || sx > pw || sy > ph) continue;
+
+      // Solid background with true pixel color
+      ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+      ctx.fillRect(sx, sy, sw, sh);
+
+      // Grid border
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(sx + 0.5, sy + 0.5, sw - 1, sh - 1);
+
+      // Only draw text when cell is large enough to be readable
+      if (sw < 16) continue;
+
+      const lum = (0.299 * r + 0.587 * g + 0.114 * b) | 0;
+      ctx.fillStyle = lum > 140 ? '#111' : '#eee';
+
+      const fontSize = Math.max(8, Math.min(sw * 0.28, 14));
+      ctx.font = 'bold ' + fontSize + 'px monospace';
+
+      const pad = Math.max(2, sw * 0.06);
+
+      if (channels === 1) {
+        ctx.fillText(String(r), sx + pad, sy + sh * 0.35);
+      } else {
+        // Display in BGR order (original image channel order)
+        const bVal = b, gVal = g, rVal = r;
+        const lineH = sh / (channels === 4 ? 4.5 : 3.5);
+        ctx.fillText(String(bVal), sx + pad, sy + lineH * 0.3);
+        ctx.fillText(String(gVal), sx + pad, sy + lineH * 1.3);
+        ctx.fillText(String(rVal), sx + pad, sy + lineH * 2.3);
+        if (channels === 4) ctx.fillText(String(a), sx + pad, sy + lineH * 3.3);
+      }
+    }
+  }
+}
+
 // ── Preview interactions ───────────────────────────────────────────────────
 previewPane.addEventListener('wheel', e => {
   if (!pv.loaded) return;
@@ -905,7 +1008,7 @@ previewPane.addEventListener('wheel', e => {
   const ix = (mx - pv.ox) / pv.scale, iy = (my - pv.oy) / pv.scale;
   pv.scale = Math.max(0.01, Math.min(128, pv.scale * (e.deltaY < 0 ? 1.18 : 1/1.18)));
   pv.ox = mx - ix * pv.scale; pv.oy = my - iy * pv.scale;
-  applyPv(); updateZoomLabel();
+  applyPv(); updateZoomLabel(); updatePixelOverlay();
 }, { passive: false });
 
 previewPane.addEventListener('mousedown', e => {
@@ -916,7 +1019,8 @@ previewPane.addEventListener('mousedown', e => {
 window.addEventListener('mousemove', e => {
   if (!pv.dragging) return;
   pv.ox += e.clientX - pv.lx; pv.oy += e.clientY - pv.ly;
-  pv.lx = e.clientX; pv.ly = e.clientY; applyPv();
+  pv.lx = e.clientX; pv.ly = e.clientY;
+  applyPv(); updatePixelOverlay();
 });
 window.addEventListener('mouseup', () => {
   if (pv.dragging) { pv.dragging = false; previewPane.style.cursor = 'crosshair'; }
@@ -924,7 +1028,7 @@ window.addEventListener('mouseup', () => {
 
 previewPane.addEventListener('dblclick', () => {
   if (!pv.loaded) return;
-  fitPreview(previewCv.width, previewCv.height); updateZoomLabel();
+  fitPreview(previewCv.width, previewCv.height); updateZoomLabel(); updatePixelOverlay();
 });
 
 previewPane.addEventListener('mousemove', e => {
