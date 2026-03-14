@@ -1,0 +1,96 @@
+{
+  "name": "image-watch-vscode",
+  "displayName": "Image Watch",
+  "description": "Inspect image variables (cv::Mat, numpy ndarray, PIL Image) while debugging — zoom, pan, and examine pixel values in real time.",
+  "version": "0.1.0",
+  "publisher": "image-watch-vscode",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Visualization"
+  ],
+  "keywords": [
+    "image", "watch", "opencv", "numpy", "debug", "cv::Mat", "ndarray"
+  ],
+  "activationEvents": [
+    "onDebugInitializing",
+    "onDebugStart"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "image-watch-vscode.openPanel",
+        "title": "Image Watch: Open Panel",
+        "category": "Image Watch"
+      },
+      {
+        "command": "image-watch-vscode.clearImages",
+        "title": "Image Watch: Clear All Images",
+        "category": "Image Watch"
+      },
+      {
+        "command": "image-watch-vscode.addToWatch",
+        "title": "Image Watch: Scan Debug Variables",
+        "category": "Image Watch"
+      },
+      {
+        "command": "image-watch-vscode.refresh",
+        "title": "Image Watch: Refresh Watch List",
+        "category": "Image Watch"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "image-watch-vscode.openPanel",
+        "key": "ctrl+shift+i",
+        "mac": "cmd+shift+i",
+        "when": "!isMac || true"
+      },
+      {
+        "command": "image-watch-vscode.refresh",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r",
+        "when": "inDebugMode"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "when": "debugState == stopped || debugState == running",
+          "command": "image-watch-vscode.addToWatch",
+          "group": "debug@1"
+        }
+      ],
+      "commandPalette": [
+        { "command": "image-watch-vscode.openPanel" },
+        { "command": "image-watch-vscode.clearImages" },
+        { "command": "image-watch-vscode.addToWatch" },
+        { "command": "image-watch-vscode.refresh" }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "@vscode/test-electron": "^2.3.8",
+    "eslint": "^8.55.0",
+    "typescript": "^5.3.3",
+    "vsce": "^2.15.0"
+  }
+}
