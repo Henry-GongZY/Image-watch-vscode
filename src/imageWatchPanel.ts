@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { getWebviewHtml } from './webviewTemplate';
 
-export interface ImageEntry {
+interface ImageEntry {
     id: string;
     name: string;
     width: number;
@@ -11,7 +11,6 @@ export interface ImageEntry {
     isFile: boolean;
     mimeType?: string;
     base64Data: string;
-    timestamp: number;
     source: 'file' | 'scan' | 'watch';
     typeInfo?: string;
 }
@@ -20,14 +19,12 @@ export class ImageWatchPanel {
     public static currentPanel: ImageWatchPanel | undefined;
 
     private readonly panel: vscode.WebviewPanel;
-    private readonly extensionUri: vscode.Uri;
     private images: Map<string, ImageEntry> = new Map();
     private watchList: string[] = [];
     private idCounter = 0;
 
-    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+    private constructor(panel: vscode.WebviewPanel) {
         this.panel = panel;
-        this.extensionUri = extensionUri;
 
         this.panel.webview.html = getWebviewHtml();
 
@@ -55,12 +52,8 @@ export class ImageWatchPanel {
             case 'addWatchExpression':
                 await this.addToWatchList(msg.expression as string);
                 break;
-            case 'removeWatchExpression':
-                this.removeFromWatchList(msg.expression as string);
-                break;
             case 'removeImage':
-                this.images.delete(msg.id as string);
-                this.postImages();
+                this.removeImage(msg.id as string);
                 break;
             case 'clear':
                 this.clearImages();
@@ -71,7 +64,7 @@ export class ImageWatchPanel {
         }
     }
 
-    public static createOrShow(extensionUri: vscode.Uri) {
+    public static createOrShow() {
         if (ImageWatchPanel.currentPanel) {
             ImageWatchPanel.currentPanel.panel.reveal(vscode.ViewColumn.Two);
             return;
@@ -84,7 +77,7 @@ export class ImageWatchPanel {
             { enableScripts: true, retainContextWhenHidden: true }
         );
 
-        ImageWatchPanel.currentPanel = new ImageWatchPanel(panel, extensionUri);
+        ImageWatchPanel.currentPanel = new ImageWatchPanel(panel);
     }
 
     public hasWatchItems(): boolean { return this.watchList.length > 0; }
@@ -101,12 +94,24 @@ export class ImageWatchPanel {
         this.postImages();
     }
 
-    private postImages() {
-        this.panel.webview.postMessage({ type: 'updateImages', images: Array.from(this.images.values()) });
+    private removeImage(id: string) {
+        for (const [key, entry] of this.images) {
+            if (entry.id !== id) { continue; }
+            this.images.delete(key);
+            if (entry.source === 'watch') {
+                this.watchList = this.watchList.filter(expression => expression !== entry.name);
+            }
+            break;
+        }
+        this.postImages();
     }
 
-    private postWatchList() {
-        this.panel.webview.postMessage({ type: 'updateWatchList', names: this.watchList });
+    private setScannedImage(entry: ImageEntry) {
+        this.images.set(`scan:${entry.name}`, entry);
+    }
+
+    private postImages() {
+        this.panel.webview.postMessage({ type: 'updateImages', images: Array.from(this.images.values()) });
     }
 
     private postStatus(message: string) {
@@ -115,12 +120,9 @@ export class ImageWatchPanel {
 
     /** Log and send a DAP customRequest; logs all debugger interactions for tracing (int)img.cols etc. */
     private async dapRequest<T = unknown>(session: vscode.DebugSession, command: string, args: Record<string, unknown>, logLabel: string): Promise<T> {
-        const safeArgs = command === 'evaluate' && typeof args.expression === 'string'
-            ? { ...args, expression: args.expression }
-            : args;
-        console.log(`[Image Watch] DAP REQUEST ${logLabel} | command=${command}`, JSON.stringify(safeArgs, null, 0).slice(0, 500));
+        console.log(`[Image Watch] DAP REQUEST ${logLabel} | command=${command}`, JSON.stringify(args).slice(0, 500));
         try {
-            const out = await session.customRequest(command, args as Record<string, unknown>) as T;
+            const out = await session.customRequest(command, args) as T;
             const outStr = typeof out === 'object' && out !== null && 'result' in out
                 ? `result=${String((out as { result?: unknown }).result).slice(0, 200)}`
                 : 'ok';
@@ -151,7 +153,6 @@ export class ImageWatchPanel {
     private async addToWatchList(expression: string) {
         if (!expression) { return; }
         if (!this.watchList.includes(expression)) { this.watchList.push(expression); }
-        this.postWatchList();
 
         const session = vscode.debug.activeDebugSession;
         if (session) {
@@ -161,13 +162,6 @@ export class ImageWatchPanel {
             if (entry) { entry.source = 'watch'; this.images.set(expression, entry); this.postImages(); }
             this.postStatus('');
         }
-    }
-
-    private removeFromWatchList(expression: string) {
-        this.watchList = this.watchList.filter(e => e !== expression);
-        this.images.delete(expression);
-        this.postWatchList();
-        this.postImages();
     }
 
     private async loadImageFromFile() {
@@ -185,7 +179,7 @@ export class ImageWatchPanel {
                 const base64Data = Buffer.from(buffer).toString('base64');
                 const name = path.basename(uri.fsPath);
                 const id = `file_${this.idCounter++}`;
-                this.images.set(id, { id, name, width: 0, height: 0, channels: 0, isFile: true, mimeType, base64Data, timestamp: Date.now(), source: 'file' });
+                this.images.set(id, { id, name, width: 0, height: 0, channels: 0, isFile: true, mimeType, base64Data, source: 'file' });
             } catch (err) {
                 vscode.window.showErrorMessage(`Failed to load ${uri.fsPath}: ${err}`);
             }
@@ -214,8 +208,8 @@ export class ImageWatchPanel {
     }
 
     private async addFromDebugPython(session: vscode.DebugSession) {
-        const frame = await this.getActiveFrame(session);
-        if (!frame) {
+        const frameId = await this.getActiveFrameId(session);
+        if (frameId === null) {
             this.postStatus('');
             vscode.window.showWarningMessage('No stack frame available. Pause the debugger before scanning.');
             return;
@@ -224,10 +218,10 @@ export class ImageWatchPanel {
         const scopesResp = await this.dapRequest<{ scopes?: { variablesReference: number; expensive?: boolean }[] }>(
             session,
             'scopes',
-            { frameId: frame.frameId },
+            { frameId },
             'addFromDebugPython.scopes'
         );
-        const candidates = new Map<string, { name: string; type?: string }>();
+        const candidates = new Set<string>();
 
         for (const scope of (scopesResp.scopes ?? [])) {
             if (!scope.variablesReference || scope.expensive) { continue; }
@@ -239,15 +233,15 @@ export class ImageWatchPanel {
             );
             for (const variable of (varsResp.variables ?? [])) {
                 if (this.isImageLikeVariable(variable)) {
-                    candidates.set(variable.name, variable);
+                    candidates.add(variable.name);
                 }
             }
         }
 
         let found = 0;
-        for (const { name } of candidates.values()) {
-            const entry = await this.tryExtractNumpyImage(name, session, frame.frameId);
-            if (entry) { this.images.set(entry.id, entry); found++; }
+        for (const name of candidates) {
+            const entry = await this.tryExtractNumpyImage(name, session, frameId);
+            if (entry) { this.setScannedImage(entry); found++; }
         }
 
         this.postImages();
@@ -261,23 +255,23 @@ export class ImageWatchPanel {
 
     /** C++ and other languages: use DAP variables request to discover image variables. */
     private async addFromDebugGeneric(session: vscode.DebugSession) {
-        const frame = await this.getActiveFrame(session);
-        if (!frame) {
+        const frameId = await this.getActiveFrameId(session);
+        if (frameId === null) {
             vscode.window.showWarningMessage('No stack frames available. Make sure the debugger is paused.');
             this.postStatus('');
             return;
         }
 
-        const scopesResp = await this.dapRequest<{ scopes?: { variablesReference: number; expensive?: boolean }[] }>(session, 'scopes', { frameId: frame.frameId }, 'addFromDebugGeneric.scopes');
+        const scopesResp = await this.dapRequest<{ scopes?: { variablesReference: number; expensive?: boolean }[] }>(session, 'scopes', { frameId }, 'addFromDebugGeneric.scopes');
         let found = 0;
 
         for (const scope of (scopesResp.scopes ?? [])) {
             if (!scope.variablesReference || scope.expensive) { continue; }
-            const varsResp = await this.dapRequest<{ variables?: { name: string; type?: string; value?: string; variablesReference: number }[] }>(session, 'variables', { variablesReference: scope.variablesReference }, 'addFromDebugGeneric.variables(scope)');
+            const varsResp = await this.dapRequest<{ variables?: { name: string; type?: string; variablesReference: number }[] }>(session, 'variables', { variablesReference: scope.variablesReference }, 'addFromDebugGeneric.variables(scope)');
             for (const variable of (varsResp.variables ?? [])) {
                 if (this.isImageLikeVariable(variable)) {
-                    const entry = await this.tryExtractFromVariable(variable, session, frame.frameId);
-                    if (entry) { this.images.set(entry.id, entry); found++; }
+                    const entry = await this.tryExtractFromVariable(variable, session);
+                    if (entry) { this.setScannedImage(entry); found++; }
                 }
             }
         }
@@ -298,14 +292,14 @@ export class ImageWatchPanel {
         } catch { return 1; }
     }
 
-    private async getActiveFrame(session: vscode.DebugSession): Promise<{ threadId: number; frameId: number } | null> {
+    private async getActiveFrameId(session: vscode.DebugSession): Promise<number | null> {
         const activeItem = vscode.debug.activeStackItem;
         let threadId: number;
 
         if (activeItem?.session.id === session.id) {
             threadId = activeItem.threadId;
             if ('frameId' in activeItem) {
-                return { threadId, frameId: activeItem.frameId };
+                return activeItem.frameId;
             }
         } else {
             threadId = await this.getFirstThreadId(session);
@@ -318,8 +312,7 @@ export class ImageWatchPanel {
                 { threadId, startFrame: 0, levels: 1 },
                 'getActiveFrame.stackTrace'
             );
-            const frameId = stackTrace.stackFrames?.[0]?.id;
-            return frameId === undefined ? null : { threadId, frameId };
+            return stackTrace.stackFrames?.[0]?.id ?? null;
         } catch {
             return null;
         }
@@ -345,22 +338,22 @@ export class ImageWatchPanel {
 
     private async extractImageByExpression(expression: string, session: vscode.DebugSession): Promise<ImageEntry | null> {
         console.log('[Image Watch] extractImageByExpression ENTRY | expression=', expression);
-        const frame = await this.getActiveFrame(session);
-        if (!frame) { return null; }
+        const frameId = await this.getActiveFrameId(session);
+        if (frameId === null) { return null; }
 
-        const numpyEntry = await this.tryExtractNumpyImage(expression, session, frame.frameId);
+        const numpyEntry = await this.tryExtractNumpyImage(expression, session, frameId);
         if (numpyEntry) { return numpyEntry; }
 
         if (this.isPythonSession(session)) {
-            return await this.tryExtractOpenCVMatByEvaluate(expression, session, frame.frameId);
+            return await this.tryExtractPythonArrayLikeImage(expression, session, frameId);
         }
 
         try {
-            const evalResult = await this.dapRequest<{ variablesReference: number; type?: string; result?: string }>(session, 'evaluate', { expression, frameId: frame.frameId, context: 'watch' }, 'extractImageByExpression.evaluate(watch)');
+            const evalResult = await this.dapRequest<{ variablesReference: number; type?: string }>(session, 'evaluate', { expression, frameId, context: 'watch' }, 'extractImageByExpression.evaluate(watch)');
             if (evalResult.variablesReference > 0) {
                 return await this.tryExtractFromVariable(
-                    { name: expression, type: evalResult.type, variablesReference: evalResult.variablesReference, value: evalResult.result },
-                    session, frame.frameId
+                    { name: expression, type: evalResult.type, variablesReference: evalResult.variablesReference },
+                    session
                 );
             }
         } catch (e) { console.error('extractImageByExpression failed:', e); }
@@ -389,28 +382,26 @@ export class ImageWatchPanel {
             if (Math.abs(Math.floor(base64Data.length * 3 / 4) - expectedBytes) > 4) { return null; }
 
             const id = `np_${name}_${this.idCounter++}`;
-            return { id, name, width, height, channels, isFile: false, base64Data, timestamp: Date.now(), source: 'scan' as const };
+            return { id, name, width, height, channels, isFile: false, base64Data, source: 'scan' };
         } catch { return null; }
     }
 
-    private async tryExtractOpenCVMatByEvaluate(name: string, session: vscode.DebugSession, frameId: number): Promise<ImageEntry | null> {
-        const isPython = this.isPythonSession(session);
-
-        const hExpr = isPython ? `${name}.shape[0]` : `${name}.rows`;
-        const wExpr = isPython ? `${name}.shape[1]` : `${name}.cols`;
-        const cExpr = isPython ? `(${name}.shape[2] if len(${name}.shape) > 2 else 1)` : `${name}.channels()`;
+    private async tryExtractPythonArrayLikeImage(name: string, session: vscode.DebugSession, frameId: number): Promise<ImageEntry | null> {
+        const hExpr = `${name}.shape[0]`;
+        const wExpr = `${name}.shape[1]`;
+        const cExpr = `(${name}.shape[2] if len(${name}.shape) > 2 else 1)`;
 
         try {
-            const rowsRes = await this.dapRequest<{ result?: unknown }>(session, 'evaluate', { expression: hExpr, frameId, context: 'watch' }, `tryExtractOpenCV.rows(${name})`);
-            const colsRes = await this.dapRequest<{ result?: unknown }>(session, 'evaluate', { expression: wExpr, frameId, context: 'watch' }, `tryExtractOpenCV.cols(${name})`);
-            const chRes = await this.dapRequest<{ result?: unknown }>(session, 'evaluate', { expression: cExpr, frameId, context: 'watch' }, `tryExtractOpenCV.ch(${name})`);
+            const rowsRes = await this.dapRequest<{ result?: unknown }>(session, 'evaluate', { expression: hExpr, frameId, context: 'watch' }, `tryExtractPythonArrayLike.rows(${name})`);
+            const colsRes = await this.dapRequest<{ result?: unknown }>(session, 'evaluate', { expression: wExpr, frameId, context: 'watch' }, `tryExtractPythonArrayLike.cols(${name})`);
+            const chRes = await this.dapRequest<{ result?: unknown }>(session, 'evaluate', { expression: cExpr, frameId, context: 'watch' }, `tryExtractPythonArrayLike.ch(${name})`);
             const height = parseInt(String(rowsRes.result ?? '0'), 10);
             const width = parseInt(String(colsRes.result ?? '0'), 10);
             const channels = parseInt(String(chRes.result ?? '1'), 10);
             if (height <= 0 || width <= 0 || height > 8192 || width > 8192 || channels < 1 || channels > 4) { return null; }
 
             const dataExpr = `__import__('base64').b64encode(__import__('numpy').asarray(${name}).astype('uint8').tobytes()).decode()`;
-            const dataRes = await this.dapRequest<{ result?: string }>(session, 'evaluate', { expression: dataExpr, frameId, context: 'clipboard' }, `tryExtractOpenCV.data(${name})`);
+            const dataRes = await this.dapRequest<{ result?: string }>(session, 'evaluate', { expression: dataExpr, frameId, context: 'clipboard' }, `tryExtractPythonArrayLike.data(${name})`);
             const base64Data = (String(dataRes.result ?? '')).replace(/^'|'$/g, '').trim();
             if (!base64Data || base64Data.length < 4) { return null; }
 
@@ -418,24 +409,14 @@ export class ImageWatchPanel {
             if (Math.abs(Math.floor(base64Data.length * 3 / 4) - expectedBytes) > 4) { return null; }
 
             const id = `cv_${name}_${this.idCounter++}`;
-            return { id, name, width, height, channels, isFile: false, base64Data, timestamp: Date.now(), source: 'scan' as const };
+            return { id, name, width, height, channels, isFile: false, base64Data, source: 'scan' };
         } catch { return null; }
     }
 
     private async tryExtractFromVariable(
-        variable: { name: string; type?: string; variablesReference: number; value?: string },
-        session: vscode.DebugSession,
-        frameId: number
+        variable: { name: string; type?: string; variablesReference: number },
+        session: vscode.DebugSession
     ): Promise<ImageEntry | null> {
-        const isPython = this.isPythonSession(session);
-        const numpyEntry = await this.tryExtractNumpyImage(variable.name, session, frameId);
-        if (numpyEntry) { return numpyEntry; }
-        if (isPython) {
-            const openCvEntry = await this.tryExtractOpenCVMatByEvaluate(variable.name, session, frameId);
-            if (openCvEntry) { return openCvEntry; }
-            return null;
-        }
-
         if (!variable.variablesReference) { return null; }
 
         try {
@@ -469,7 +450,7 @@ export class ImageWatchPanel {
                     }
                     const base64Data = Buffer.from(raw).toString('base64');
                     const id = `var_${variable.name}_${this.idCounter++}`;
-                    return { id, name: variable.name, width, height, channels, isFile: false, base64Data, timestamp: Date.now(), source: 'scan' as const, typeInfo: variable.type };
+                    return { id, name: variable.name, width, height, channels, isFile: false, base64Data, source: 'scan', typeInfo: variable.type };
                 }
             }
             return null;
@@ -479,6 +460,4 @@ export class ImageWatchPanel {
         }
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    private getHtmlForWebview(): string { return getWebviewHtml(); }
 }

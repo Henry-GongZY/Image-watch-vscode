@@ -86,19 +86,15 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
-    "test:logic": "node test-assets/test-logic.js",
-    "test": "node ./out/test/runTest.js",
+    "test": "node test-assets/test-logic.js",
     "package": "vsce package",
     "publish": "vsce publish"
   },
   "devDependencies": {
-    "@types/glob": "^8.1.0",
-    "@types/mocha": "^10.0.10",
     "@types/node": "^20.10.0",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
-    "@vscode/test-electron": "^2.3.8",
     "eslint": "^8.55.0",
     "typescript": "^5.3.3",
     "vsce": "^2.15.0"

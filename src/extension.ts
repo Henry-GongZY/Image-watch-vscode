@@ -3,7 +3,7 @@ import { ImageWatchPanel } from './imageWatchPanel';
 
 export function activate(context: vscode.ExtensionContext) {
     const openPanelCommand = vscode.commands.registerCommand('image-watch-vscode.openPanel', () => {
-        ImageWatchPanel.createOrShow(context.extensionUri);
+        ImageWatchPanel.createOrShow();
     });
 
     const clearImagesCommand = vscode.commands.registerCommand('image-watch-vscode.clearImages', () => {
@@ -11,7 +11,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     const addToWatchCommand = vscode.commands.registerCommand('image-watch-vscode.addToWatch', async () => {
-        ImageWatchPanel.createOrShow(context.extensionUri);
+        ImageWatchPanel.createOrShow();
         await ImageWatchPanel.currentPanel?.addFromDebug();
     });
 
@@ -33,8 +33,6 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 }
-
-export function deactivate() { }
 
 class ImageWatchDebugAdapterTrackerFactory implements vscode.DebugAdapterTrackerFactory {
     createDebugAdapterTracker(_session: vscode.DebugSession): vscode.DebugAdapterTracker {

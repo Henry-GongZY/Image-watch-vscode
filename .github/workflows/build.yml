@@ -40,7 +40,7 @@ jobs:
         run: npm run compile
 
       - name: Run image logic tests
-        run: npm run test:logic
+        run: npm test
 
       - name: Package VSIX
         id: package

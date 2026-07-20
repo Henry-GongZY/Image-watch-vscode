@@ -36,7 +36,7 @@ jobs:
         run: npm run compile
 
       - name: Run image logic tests
-        run: npm run test:logic
+        run: npm test
 
       - name: Validate version and package VSIX
         id: package

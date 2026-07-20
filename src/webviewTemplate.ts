@@ -259,7 +259,6 @@ const vscode = acquireVsCodeApi();
 
 // ���� State ������������������������������������������������������������������������������������������������������������������������������������
 let images     = [];
-let watchList  = [];
 let activeTab  = 'locals';
 let selectedId = null;
 
@@ -273,8 +272,8 @@ const pv = { scale:1, ox:0, oy:0, dragging:false, lx:0, ly:0, loaded:false };
 let linkViewEnabled = false;
 const viewStateByResolution = {}; // key = "WxH" -> { scale, ox, oy }
 
-// When scale >= this, show pixel-level grid with channel values in each cell
-const PIXEL_VIEW_THRESHOLD = 10;
+// Show the pixel grid before values; value labels have a separate fit-based threshold.
+const PIXEL_GRID_THRESHOLD = 10;
 
 function resolutionKeyFromSize(w, h) {
   return (w > 0 && h > 0) ? (w + 'x' + h) : '';
@@ -305,7 +304,6 @@ const ctxLinkView  = document.getElementById('ctxLinkView');
 window.addEventListener('message', ev => {
   const m = ev.data;
   if (m.type === 'updateImages')    { applyImageUpdate(m.images); }
-  if (m.type === 'updateWatchList') { watchList = m.names; renderList(); }
   if (m.type === 'status')          { statusTxt.textContent = m.message; }
 });
 
@@ -408,7 +406,7 @@ function buildListItem(imgData) {
   // Remove button
   const del = document.createElement('button');
   del.className = 'item-del';
-  del.textContent = '��';
+  del.textContent = '\\u00d7';
   del.title = 'Remove';
   del.addEventListener('click', e => {
     e.stopPropagation();
@@ -565,7 +563,7 @@ function updatePixelOverlay() {
 
   const pw = previewPane.clientWidth || 400, ph = previewPane.clientHeight || 300;
 
-  if (pv.scale < PIXEL_VIEW_THRESHOLD) {
+  if (pv.scale < PIXEL_GRID_THRESHOLD) {
     pixelOverlayCv.style.display = 'none';
     return;
   }
@@ -597,9 +595,13 @@ function updatePixelOverlay() {
   const imageData = imgCtx.getImageData(x0, y0, regionW, regionH);
   const data = imageData.data;
 
-  const cellSize = pv.scale; // e.g. 11.55 px per pixel cell on screen
-
-  ctx.textBaseline = 'top';
+  const cellSize = pv.scale;
+  const valueCount = channels === 1 ? 1 : (channels === 4 ? 4 : 3);
+  const fontSize = Math.max(9, Math.min(12, Math.floor(cellSize / 5)));
+  const lineHeight = fontSize + 1;
+  const labelHeight = valueCount * lineHeight + 4;
+  const showValues = cellSize >= Math.max(42, labelHeight + 6);
+  const valueCells = [];
 
   for (let iy = 0; iy < regionH; iy++) {
     for (let ix = 0; ix < regionW; ix++) {
@@ -607,11 +609,13 @@ function updatePixelOverlay() {
       // Canvas stores RGB (BGR->RGB already done by fillRgba)
       const r = data[srcIdx], g = data[srcIdx + 1], b = data[srcIdx + 2], a = data[srcIdx + 3];
 
-      // Screen coordinates of this cell (integer boundaries ??no blending)
+      // Integer screen-space edges avoid seams at fractional zoom levels.
       const sx = Math.round((x0 + ix) * pv.scale + pv.ox);
       const sy = Math.round((y0 + iy) * pv.scale + pv.oy);
-      const sw = Math.round(cellSize);
-      const sh = Math.round(cellSize);
+      const ex = Math.round((x0 + ix + 1) * pv.scale + pv.ox);
+      const ey = Math.round((y0 + iy + 1) * pv.scale + pv.oy);
+      const sw = ex - sx;
+      const sh = ey - sy;
 
       // Skip cells outside screen
       if (sx + sw < 0 || sy + sh < 0 || sx > pw || sy > ph) continue;
@@ -620,33 +624,49 @@ function updatePixelOverlay() {
       ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
       ctx.fillRect(sx, sy, sw, sh);
 
-      // Grid border
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(sx + 0.5, sy + 0.5, sw - 1, sh - 1);
+      if (!showValues) continue;
+      const values = channels === 1 ? [r] : (channels === 4 ? [b, g, r, a] : [b, g, r]);
+      valueCells.push({ sx, sy, sw, sh, values });
+    }
+  }
 
-      // Only draw text when cell is large enough to be readable
-      if (sw < 16) continue;
+  // Draw grid lines once so shared edges stay crisp and have uniform weight.
+  ctx.beginPath();
+  for (let ix = 0; ix <= regionW; ix++) {
+    const x = Math.round((x0 + ix) * pv.scale + pv.ox) + 0.5;
+    ctx.moveTo(x, Math.round(y0 * pv.scale + pv.oy));
+    ctx.lineTo(x, Math.round(y1 * pv.scale + pv.oy));
+  }
+  for (let iy = 0; iy <= regionH; iy++) {
+    const y = Math.round((y0 + iy) * pv.scale + pv.oy) + 0.5;
+    ctx.moveTo(Math.round(x0 * pv.scale + pv.ox), y);
+    ctx.lineTo(Math.round(x1 * pv.scale + pv.ox), y);
+  }
+  ctx.strokeStyle = 'rgba(232,232,232,0.58)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
 
-      const lum = (0.299 * r + 0.587 * g + 0.114 * b) | 0;
-      ctx.fillStyle = lum > 140 ? '#111' : '#eee';
+  if (!showValues) return;
 
-      const fontSize = Math.max(8, Math.min(sw * 0.28, 14));
-      ctx.font = 'bold ' + fontSize + 'px monospace';
+  ctx.font = fontSize + 'px Consolas, "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const labelWidth = Math.ceil(ctx.measureText('255').width) + 8;
 
-      const pad = Math.max(2, sw * 0.06);
+  for (const cell of valueCells) {
+    if (labelWidth + 6 > cell.sw || labelHeight + 6 > cell.sh) continue;
 
-      if (channels === 1) {
-        ctx.fillText(String(r), sx + pad, sy + sh * 0.35);
-      } else {
-        // Display in BGR order (original image channel order)
-        const bVal = b, gVal = g, rVal = r;
-        const lineH = sh / (channels === 4 ? 4.5 : 3.5);
-        ctx.fillText(String(bVal), sx + pad, sy + lineH * 0.3);
-        ctx.fillText(String(gVal), sx + pad, sy + lineH * 1.3);
-        ctx.fillText(String(rVal), sx + pad, sy + lineH * 2.3);
-        if (channels === 4) ctx.fillText(String(a), sx + pad, sy + lineH * 3.3);
-      }
+    const labelX = Math.round(cell.sx + (cell.sw - labelWidth) / 2);
+    const labelY = Math.round(cell.sy + (cell.sh - labelHeight) / 2);
+    ctx.fillStyle = 'rgba(238,238,238,0.72)';
+    ctx.fillRect(labelX, labelY, labelWidth, labelHeight);
+    ctx.strokeStyle = 'rgba(20,20,20,0.32)';
+    ctx.strokeRect(labelX + 0.5, labelY + 0.5, labelWidth - 1, labelHeight - 1);
+
+    ctx.fillStyle = 'rgba(12,12,12,0.96)';
+    for (let i = 0; i < cell.values.length; i++) {
+      const textY = labelY + 2 + lineHeight * (i + 0.5);
+      ctx.fillText(String(cell.values[i]), labelX + labelWidth / 2, textY);
     }
   }
 }
