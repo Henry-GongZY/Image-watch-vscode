@@ -772,7 +772,10 @@ function addWatch() {
 
 // ���� Toolbar ��������������������������������������������������������������������������������������������������������������������������������
 document.getElementById('btnLoad').addEventListener('click',    () => vscode.postMessage({ type: 'loadImage' }));
-document.getElementById('btnScan').addEventListener('click',    () => vscode.postMessage({ type: 'addFromDebug' }));
+document.getElementById('btnScan').addEventListener('click', () => {
+  switchTab('locals');
+  vscode.postMessage({ type: 'addFromDebug' });
+});
 document.getElementById('btnRefresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
 document.getElementById('btnClear').addEventListener('click',   () => vscode.postMessage({ type: 'clear' }));
 

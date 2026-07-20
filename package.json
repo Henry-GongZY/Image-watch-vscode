@@ -4,6 +4,15 @@
   "description": "Inspect image variables (cv::Mat, numpy ndarray, PIL Image) while debugging — zoom, pan, and examine pixel values in real time.",
   "version": "0.1.0",
   "publisher": "image-watch-vscode",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Henry-GongZY/Image-watch-vscode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Henry-GongZY/Image-watch-vscode/issues"
+  },
+  "homepage": "https://github.com/Henry-GongZY/Image-watch-vscode#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
