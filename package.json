@@ -86,6 +86,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
+    "test:logic": "node test-assets/test-logic.js",
     "test": "node ./out/test/runTest.js",
     "package": "vsce package",
     "publish": "vsce publish"
