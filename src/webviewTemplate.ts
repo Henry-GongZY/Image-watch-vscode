@@ -150,6 +150,42 @@ canvas.pixel-overlay-cv{
   pointer-events:none;
 }
 
+/* Histogram overlay (single-channel images) */
+.hist-panel{
+  position:absolute;top:36px;right:10px;z-index:5;
+  width:clamp(220px,32vw,340px);max-width:calc(100% - 20px);
+  padding:9px 10px 8px;border-radius:4px;
+  background:var(--vscode-editorWidget-background,#252526);
+  background:color-mix(in srgb,var(--vscode-editorWidget-background,#252526) 94%,transparent);
+  border:1px solid var(--vscode-editorWidget-border,rgba(255,255,255,.18));
+  box-shadow:0 4px 16px rgba(0,0,0,.32);cursor:default;user-select:none;
+}
+.hist-header{height:24px;display:flex;align-items:flex-start;gap:8px}
+.hist-title{flex-shrink:0;font-size:12px;font-weight:600;line-height:20px;color:var(--vscode-editorWidget-foreground,#d4d4d4)}
+.hist-total{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font:10px/20px var(--vscode-editor-font-family,monospace);color:var(--vscode-descriptionForeground,#999)
+}
+.hist-scale{
+  display:flex;flex-shrink:0;margin-left:auto;border:1px solid var(--vscode-input-border,#555);border-radius:3px;overflow:hidden;
+}
+.hist-scale-btn{
+  height:20px;padding:0 7px;border:0;border-right:1px solid var(--vscode-input-border,#555);
+  background:var(--vscode-button-secondaryBackground,#3c3c3c);color:var(--vscode-button-secondaryForeground,#ccc);
+  font-size:10px;line-height:20px;cursor:pointer;
+}
+.hist-scale-btn:last-child{border-right:0}
+.hist-scale-btn:hover{background:var(--vscode-button-secondaryHoverBackground,#4c4c4c)}
+.hist-scale-btn.active{background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff)}
+.hist-cv{display:block;width:100%;height:148px;cursor:crosshair}
+.hist-readout{
+  height:20px;display:flex;align-items:flex-end;justify-content:space-between;gap:8px;
+  color:var(--vscode-descriptionForeground,#aaa);font:10px/16px var(--vscode-editor-font-family,monospace);
+  white-space:nowrap;
+}
+.hist-readout.hover{color:var(--vscode-editorWidget-foreground,#ddd);justify-content:flex-start}
+.hist-readout span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+
 /* Bottom pixel info bar */
 .pixel-bar{
   position:absolute;bottom:0;left:0;right:0;
@@ -237,6 +273,18 @@ function getBody(): string {
     <!-- Pixel overlay is NOT inside canvas-wrap: it renders in screen space, not scaled -->
     <canvas class="pixel-overlay-cv" id="pixelOverlayCv" style="display:none"></canvas>
     <div class="zoom-lbl"  id="zoomLbl"  style="display:none"></div>
+    <div class="hist-panel" id="histPanel" style="display:none">
+      <div class="hist-header">
+        <span class="hist-title">Histogram</span>
+        <span class="hist-total" id="histTotal"></span>
+        <div class="hist-scale" aria-label="Histogram scale">
+          <button class="hist-scale-btn active" id="histLinear" type="button" aria-pressed="true">Linear</button>
+          <button class="hist-scale-btn" id="histLog" type="button" aria-pressed="false">Log</button>
+        </div>
+      </div>
+      <canvas class="hist-cv" id="histCv"></canvas>
+      <div class="hist-readout" id="histReadout"></div>
+    </div>
     <div class="pixel-bar" id="pixelBar" style="display:none"></div>
   </div>
 </div>
@@ -244,6 +292,12 @@ function getBody(): string {
 <div id="contextMenu" class="ctx-menu">
   <div id="ctxLinkView" class="ctx-item" title="Same-resolution images share zoom and pan">
     <span class="check">&#10003;</span><span>LinkView</span>
+  </div>
+  <div id="ctxHistogram" class="ctx-item" style="display:none" title="Show/hide histogram for single-channel image">
+    <span class="check">&#10003;</span><span>Histogram</span>
+  </div>
+  <div id="ctxHeatmap" class="ctx-item" style="display:none" title="Toggle between grayscale and heatmap (jet colormap)">
+    <span class="check">&#10003;</span><span>Heatmap</span>
   </div>
 </div>
 <div id="tooltip"></div>
@@ -272,6 +326,13 @@ const pv = { scale:1, ox:0, oy:0, dragging:false, lx:0, ly:0, loaded:false };
 let linkViewEnabled = false;
 const viewStateByResolution = {}; // key = "WxH" -> { scale, ox, oy }
 
+// Histogram & Heatmap (single-channel only)
+let histogramEnabled = false;
+let heatmapEnabled = false;
+const histCache = new Map(); // id -> Uint32Array(256)
+let histogramScale = 'linear';
+let histogramView = null;
+
 // Show the pixel grid before values; value labels have a separate fit-based threshold.
 const PIXEL_GRID_THRESHOLD = 10;
 
@@ -297,8 +358,16 @@ const zoomLbl        = document.getElementById('zoomLbl');
 const pixelBar     = document.getElementById('pixelBar');
 const statusTxt    = document.getElementById('statusTxt');
 const tooltip      = document.getElementById('tooltip');
-const contextMenu = document.getElementById('contextMenu');
+const contextMenu  = document.getElementById('contextMenu');
 const ctxLinkView  = document.getElementById('ctxLinkView');
+const ctxHistogram = document.getElementById('ctxHistogram');
+const ctxHeatmap   = document.getElementById('ctxHeatmap');
+const histPanel    = document.getElementById('histPanel');
+const histCv       = document.getElementById('histCv');
+const histTotal    = document.getElementById('histTotal');
+const histReadout  = document.getElementById('histReadout');
+const histLinear   = document.getElementById('histLinear');
+const histLog      = document.getElementById('histLog');
 
 // ���� Message bus ������������������������������������������������������������������������������������������������������������������������
 window.addEventListener('message', ev => {
@@ -310,6 +379,7 @@ window.addEventListener('message', ev => {
 function applyImageUpdate(newImages) {
   const newIds = new Set(newImages.map(i => i.id));
   for (const id of decoded.keys()) { if (!newIds.has(id)) decoded.delete(id); }
+  for (const id of histCache.keys()) { if (!newIds.has(id)) histCache.delete(id); }
   images = newImages;
   if (selectedId && !newIds.has(selectedId)) { selectedId = null; }
   renderList();
@@ -391,8 +461,7 @@ function buildListItem(imgData) {
   if (imgData.isFile) {
     meta2.textContent = (imgData.mimeType || 'image').replace('image/', '').toUpperCase();
   } else if (imgData.channels > 0) {
-    const t = {1:'Gray - UINT8', 3:'BGR - UINT8', 4:'BGRA - UINT8'}[imgData.channels] || (imgData.channels + ' ch');
-    meta2.textContent = t;
+    meta2.textContent = imgData.channels + ' * UINT8';
   }
   if (imgData.typeInfo) {
     const t = imgData.typeInfo.length > 28 ? imgData.typeInfo.slice(0,26) + '...' : imgData.typeInfo;
@@ -485,6 +554,8 @@ function clearPreview() {
   zoomLbl.style.display         = 'none';
   pixelBar.style.display        = 'none';
   pixelOverlayCv.style.display  = 'none';
+  histPanel.style.display       = 'none';
+  histogramView                = null;
   pv.loaded = false;
 }
 
@@ -501,8 +572,14 @@ function renderPreview(imgData) {
     previewCv.width = w; previewCv.height = h;
     const ctx = previewCv.getContext('2d');
     ctx.clearRect(0, 0, w, h);
-    ctx.drawImage(src, 0, 0);
+    const isSingleCh = !imgData.isFile && imgData.channels === 1;
+    if (heatmapEnabled && isSingleCh) {
+      ctx.drawImage(applyHeatmap(src, w, h), 0, 0);
+    } else {
+      ctx.drawImage(src, 0, 0);
+    }
     pv.loaded = true;
+    updateHistogram();
     const key = resolutionKeyFromSize(w, h);
     if (linkViewEnabled && key && viewStateByResolution[key]) {
       const vs = viewStateByResolution[key];
@@ -737,12 +814,21 @@ previewPane.addEventListener('mouseleave', () => {
   tooltip.style.display = 'none'; pixelBar.textContent = '';
 });
 
-// Context menu: right-click to show LinkView option
+// Context menu: right-click to show options
+function isSelectedSingleChannel() {
+  const img = images.find(i => i.id === selectedId);
+  return !!(img && !img.isFile && img.channels === 1);
+}
 function showContextMenu(x, y) {
+  const singleCh = isSelectedSingleChannel();
+  ctxHistogram.style.display = singleCh ? 'flex' : 'none';
+  ctxHeatmap.style.display   = singleCh ? 'flex' : 'none';
   contextMenu.style.left = x + 'px';
   contextMenu.style.top = y + 'px';
   contextMenu.classList.add('show');
   ctxLinkView.classList.toggle('checked', linkViewEnabled);
+  ctxHistogram.classList.toggle('checked', histogramEnabled);
+  ctxHeatmap.classList.toggle('checked', heatmapEnabled);
 }
 function hideContextMenu() {
   contextMenu.classList.remove('show');
@@ -759,6 +845,19 @@ ctxLinkView.addEventListener('click', () => {
   linkViewEnabled = !linkViewEnabled;
   ctxLinkView.classList.toggle('checked', linkViewEnabled);
   if (linkViewEnabled && pv.loaded) saveViewStateForCurrentResolution();
+  hideContextMenu();
+});
+ctxHistogram.addEventListener('click', () => {
+  histogramEnabled = !histogramEnabled;
+  ctxHistogram.classList.toggle('checked', histogramEnabled);
+  updateHistogram();
+  hideContextMenu();
+});
+ctxHeatmap.addEventListener('click', () => {
+  heatmapEnabled = !heatmapEnabled;
+  ctxHeatmap.classList.toggle('checked', heatmapEnabled);
+  const img = images.find(i => i.id === selectedId);
+  if (img) renderPreview(img);
   hideContextMenu();
 });
 window.addEventListener('click', () => hideContextMenu());
@@ -798,6 +897,281 @@ document.getElementById('btnScan').addEventListener('click', () => {
 });
 document.getElementById('btnRefresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
 document.getElementById('btnClear').addEventListener('click',   () => vscode.postMessage({ type: 'clear' }));
+
+// ──── Histogram (single-channel) ────────────────────────────────────────────────────────────────────────────────
+function updateHistogram() {
+  const img = images.find(i => i.id === selectedId);
+  const singleCh = img && !img.isFile && img.channels === 1;
+  if (!histogramEnabled || !pv.loaded || !singleCh) {
+    histPanel.style.display = 'none';
+    histogramView = null;
+    return;
+  }
+  const d = decoded.get(img.id);
+  if (!d) { histPanel.style.display = 'none'; histogramView = null; return; }
+
+  let bins = histCache.get(img.id);
+  if (!bins) {
+    bins = new Uint32Array(256);
+    const raw = b64ToU8(img.base64Data);
+    for (let i = 0; i < raw.length; i++) bins[raw[i]]++;
+    histCache.set(img.id, bins);
+  }
+
+  let total = 0, weighted = 0, maxVal = 0, peak = 0;
+  for (let i = 0; i < 256; i++) {
+    const count = bins[i];
+    total += count;
+    weighted += count * i;
+    if (count > maxVal) { maxVal = count; peak = i; }
+  }
+  if (total === 0 || maxVal === 0) { histPanel.style.display = 'none'; return; }
+
+  let cumulative = 0, median = 0;
+  for (let i = 0; i < 256; i++) {
+    cumulative += bins[i];
+    if (cumulative >= total / 2) { median = i; break; }
+  }
+
+  histPanel.style.display = 'block';
+  histTotal.textContent = formatHistogramCount(total) + ' px';
+  histTotal.title = total.toLocaleString() + ' pixels';
+  histogramView = {
+    bins: bins,
+    total: total,
+    maxVal: maxVal,
+    mean: weighted / total,
+    median: median,
+    peak: peak,
+    plot: null,
+    hoverBin: -1
+  };
+  drawHistogram(histogramView, -1);
+}
+
+function histogramThemeColor(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+function formatHistogramCount(value) {
+  if (value >= 1000000) return (value / 1000000).toFixed(value >= 10000000 ? 0 : 1) + 'm';
+  if (value >= 1000) return (value / 1000).toFixed(value >= 10000 ? 0 : 1) + 'k';
+  return Math.round(value).toString();
+}
+
+function histogramLevel(count, maxVal) {
+  return histogramScale === 'log'
+    ? Math.log1p(count) / Math.log1p(maxVal)
+    : count / maxVal;
+}
+
+function histogramAxisCount(level, maxVal) {
+  return histogramScale === 'log'
+    ? Math.expm1(level * Math.log1p(maxVal))
+    : level * maxVal;
+}
+
+function setHistogramReadout(view, hoverBin) {
+  histReadout.textContent = '';
+  if (hoverBin >= 0) {
+    const count = view.bins[hoverBin];
+    const pct = count / view.total * 100;
+    histReadout.classList.add('hover');
+    histReadout.textContent = 'Value ' + hoverBin + '   ' + count.toLocaleString() + ' px   ' + pct.toFixed(pct < 0.1 ? 2 : 1) + '%';
+    return;
+  }
+
+  histReadout.classList.remove('hover');
+  const values = [
+    'Mean ' + view.mean.toFixed(1),
+    'Median ' + view.median,
+    'Peak ' + view.peak
+  ];
+  for (const value of values) {
+    const span = document.createElement('span');
+    span.textContent = value;
+    histReadout.appendChild(span);
+  }
+}
+
+function drawHistogram(view, hoverBin) {
+  if (!view || histPanel.style.display === 'none') return;
+
+  const width = Math.max(140, Math.round(histCv.clientWidth || 320));
+  const height = 148;
+  const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  const physicalW = Math.round(width * dpr), physicalH = Math.round(height * dpr);
+  if (histCv.width !== physicalW) histCv.width = physicalW;
+  if (histCv.height !== physicalH) histCv.height = physicalH;
+
+  const ctx = histCv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const padL = width < 210 ? 30 : 38;
+  const padR = 8, padT = 8, padB = 22;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const baseY = padT + plotH;
+  const accent = histogramThemeColor('--vscode-charts-blue', '#4daafc');
+  const textColor = histogramThemeColor('--vscode-descriptionForeground', '#a0a0a0');
+  const gridColor = histogramThemeColor('--vscode-editorWidget-border', 'rgba(255,255,255,.16)');
+
+  ctx.font = '9px ' + histogramThemeColor('--vscode-editor-font-family', 'monospace');
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = gridColor;
+  ctx.fillStyle = textColor;
+
+  for (const level of [0, 0.5, 1]) {
+    const y = Math.round(baseY - level * plotH) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(padL + plotW, y);
+    ctx.stroke();
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(formatHistogramCount(histogramAxisCount(level, view.maxVal)), padL - 6, y);
+  }
+
+  const xTicks = width < 210 ? [0, 128, 255] : [0, 64, 128, 192, 255];
+  for (const value of xTicks) {
+    const x = padL + value / 255 * plotW;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x) + 0.5, padT);
+    ctx.lineTo(Math.round(x) + 0.5, baseY);
+    ctx.stroke();
+    ctx.textBaseline = 'top';
+    ctx.textAlign = value === 0 ? 'left' : (value === 255 ? 'right' : 'center');
+    ctx.fillText(String(value), x, baseY + 6);
+  }
+
+  ctx.beginPath();
+  ctx.moveTo(padL, baseY);
+  for (let i = 0; i < 256; i++) {
+    const x = padL + i / 255 * plotW;
+    const y = baseY - histogramLevel(view.bins[i], view.maxVal) * plotH;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(padL + plotW, baseY);
+  ctx.closePath();
+  ctx.fillStyle = accent;
+  ctx.globalAlpha = 0.18;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  ctx.beginPath();
+  for (let i = 0; i < 256; i++) {
+    const x = padL + i / 255 * plotW;
+    const y = baseY - histogramLevel(view.bins[i], view.maxVal) * plotH;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 1.25;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  if (hoverBin >= 0) {
+    const x = padL + hoverBin / 255 * plotW;
+    const y = baseY - histogramLevel(view.bins[hoverBin], view.maxVal) * plotH;
+    ctx.save();
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x) + 0.5, padT);
+    ctx.lineTo(Math.round(x) + 0.5, baseY);
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+    ctx.beginPath();
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = accent;
+    ctx.fill();
+  }
+
+  view.plot = { left: padL, width: plotW, top: padT, bottom: baseY };
+  view.hoverBin = hoverBin;
+  setHistogramReadout(view, hoverBin);
+}
+
+// ──── Heatmap (jet colormap, single-channel) ────────────────────────────────────────────────────────────────────
+function setHistogramScale(scale) {
+  histogramScale = scale;
+  histLinear.classList.toggle('active', scale === 'linear');
+  histLog.classList.toggle('active', scale === 'log');
+  histLinear.setAttribute('aria-pressed', String(scale === 'linear'));
+  histLog.setAttribute('aria-pressed', String(scale === 'log'));
+  if (histogramView) drawHistogram(histogramView, -1);
+}
+
+histLinear.addEventListener('click', () => setHistogramScale('linear'));
+histLog.addEventListener('click', () => setHistogramScale('log'));
+
+histCv.addEventListener('mousemove', e => {
+  if (!histogramView || !histogramView.plot) return;
+  const rect = histCv.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (histCv.clientWidth / rect.width);
+  const y = (e.clientY - rect.top) * (histCv.clientHeight / rect.height);
+  const plot = histogramView.plot;
+  let hoverBin = -1;
+  if (x >= plot.left && x <= plot.left + plot.width && y >= plot.top && y <= plot.bottom) {
+    hoverBin = Math.max(0, Math.min(255, Math.round((x - plot.left) / plot.width * 255)));
+  }
+  if (hoverBin !== histogramView.hoverBin) drawHistogram(histogramView, hoverBin);
+});
+
+histCv.addEventListener('mouseleave', () => {
+  if (histogramView && histogramView.hoverBin !== -1) drawHistogram(histogramView, -1);
+});
+
+histPanel.addEventListener('mouseenter', () => {
+  tooltip.style.display = 'none';
+  pixelBar.textContent = '';
+});
+for (const eventName of ['mousedown', 'dblclick', 'mousemove', 'wheel']) {
+  histPanel.addEventListener(eventName, e => e.stopPropagation());
+}
+histPanel.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  e.stopPropagation();
+});
+
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => {
+    if (histogramView && histPanel.style.display !== 'none') drawHistogram(histogramView, -1);
+  }).observe(histPanel);
+}
+
+function jetLUT() {
+  const lut = new Uint8Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let r, g, b;
+    if (t < 0.125)      { r = 0;               g = 0;                 b = 0.5 + t * 4;         }
+    else if (t < 0.375) { r = 0;               g = (t - 0.125) * 4;   b = 1;                   }
+    else if (t < 0.625) { r = (t - 0.375) * 4; g = 1;                 b = 1 - (t - 0.375) * 4; }
+    else if (t < 0.875) { r = 1;               g = 1 - (t - 0.625)*4; b = 0;                   }
+    else                { r = 1 - (t-0.875)*4; g = 0;                 b = 0;                   }
+    lut[i * 3]     = Math.round(Math.max(0, Math.min(1, r)) * 255);
+    lut[i * 3 + 1] = Math.round(Math.max(0, Math.min(1, g)) * 255);
+    lut[i * 3 + 2] = Math.round(Math.max(0, Math.min(1, b)) * 255);
+  }
+  return lut;
+}
+const JET = jetLUT();
+
+function applyHeatmap(src, w, h) {
+  const tmpCv = document.createElement('canvas');
+  tmpCv.width = w; tmpCv.height = h;
+  const tmpCtx = tmpCv.getContext('2d');
+  tmpCtx.drawImage(src, 0, 0);
+  const imgData = tmpCtx.getImageData(0, 0, w, h);
+  const px = imgData.data;
+  for (let i = 0; i < px.length; i += 4) {
+    const v = px[i] * 3;
+    px[i] = JET[v]; px[i + 1] = JET[v + 1]; px[i + 2] = JET[v + 2]; px[i + 3] = 255;
+  }
+  tmpCtx.putImageData(imgData, 0, 0);
+  return tmpCv;
+}
 
 // ���� Pixel fill helper ������������������������������������������������������������������������������������������������������������
 function fillRgba(px, raw, ch) {

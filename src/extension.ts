@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { ImageWatchPanel } from './imageWatchPanel';
 
 export function activate(context: vscode.ExtensionContext) {
+    const autoOpenedSessions = new Set<string>();
+
     const openPanelCommand = vscode.commands.registerCommand('image-watch-vscode.openPanel', () => {
         ImageWatchPanel.createOrShow();
     });
@@ -26,10 +28,32 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
-        vscode.debug.onDidChangeActiveStackItem(async () => {
-            if (ImageWatchPanel.currentPanel?.hasWatchItems() && vscode.debug.activeDebugSession) {
+        vscode.debug.onDidChangeActiveStackItem(async (stackItem) => {
+            const session = vscode.debug.activeDebugSession;
+            if (!session) { return; }
+
+            const isActiveFrame = stackItem !== undefined &&
+                stackItem.session.id === session.id &&
+                'frameId' in stackItem;
+            const autoOpen = vscode.workspace
+                .getConfiguration('imageWatch')
+                .get<boolean>('autoOpenOnFirstBreak', false);
+
+            if (isActiveFrame && autoOpen && !autoOpenedSessions.has(session.id)) {
+                autoOpenedSessions.add(session.id);
+                ImageWatchPanel.createOrShow();
+                await ImageWatchPanel.currentPanel?.addFromDebug();
+            }
+
+            if (ImageWatchPanel.currentPanel?.hasWatchItems()) {
                 await ImageWatchPanel.currentPanel.refreshWatchList();
             }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.debug.onDidTerminateDebugSession((session) => {
+            autoOpenedSessions.delete(session.id);
         })
     );
 }

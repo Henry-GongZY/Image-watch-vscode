@@ -43,7 +43,8 @@
       {
         "command": "image-watch-vscode.addToWatch",
         "title": "Image Watch: Scan Debug Variables",
-        "category": "Image Watch"
+        "category": "Image Watch",
+        "icon": "$(eye)"
       },
       {
         "command": "image-watch-vscode.refresh",
@@ -66,6 +67,13 @@
       }
     ],
     "menus": {
+      "debug/toolBar": [
+        {
+          "command": "image-watch-vscode.addToWatch",
+          "when": "debugState == stopped",
+          "group": "navigation@50"
+        }
+      ],
       "editor/context": [
         {
           "when": "debugState == stopped || debugState == running",
@@ -79,6 +87,16 @@
         { "command": "image-watch-vscode.addToWatch" },
         { "command": "image-watch-vscode.refresh" }
       ]
+    },
+    "configuration": {
+      "title": "Image Watch",
+      "properties": {
+        "imageWatch.autoOpenOnFirstBreak": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically open Image Watch and scan the active frame at the first breakpoint of each debug session."
+        }
+      }
     }
   },
   "scripts": {

@@ -6,4 +6,5 @@ out/
 .DS_Store
 *.log
 *.ps1
+!pack.ps1
 *.py
