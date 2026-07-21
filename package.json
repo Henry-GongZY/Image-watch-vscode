@@ -1,7 +1,7 @@
 {
   "name": "image-watch-vscode",
   "displayName": "Image Watch",
-  "description": "Inspect image variables (cv::Mat, numpy ndarray, PIL Image) while debugging — zoom, pan, and examine pixel values in real time.",
+  "description": "Inspect OpenCV, NumPy, Pillow, and PyTorch image values while debugging, with an extensible visualization protocol for future point-cloud support.",
   "version": "0.1.0",
   "publisher": "image-watch-vscode",
   "license": "MIT",
@@ -21,7 +21,16 @@
     "Visualization"
   ],
   "keywords": [
-    "image", "watch", "opencv", "numpy", "debug", "cv::Mat", "ndarray"
+    "image",
+    "watch",
+    "opencv",
+    "numpy",
+    "pytorch",
+    "tensor",
+    "debug",
+    "cv::Mat",
+    "ndarray",
+    "point-cloud"
   ],
   "activationEvents": [
     "onDebugInitializing",
@@ -104,7 +113,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
-    "test": "node test-assets/test-logic.js",
+    "test": "npm run compile && node test-assets/test-logic.js && node test-assets/test-architecture.js",
     "package": "vsce package",
     "publish": "vsce publish"
   },

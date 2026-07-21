@@ -1,3 +1,4 @@
+import { getImageRendererHelpersScript } from './webview/imageRendererScript';
 
 
 function getStyles(): string {
@@ -95,11 +96,25 @@ body{
   user-select:none;position:relative;
 }
 .list-item:hover{background:var(--vscode-list-hoverBackground,#2a2d2e)}
+.list-item.dragging{opacity:.35}
+.list-item.drop-before::before,.list-item.drop-after::after{
+  content:'';position:absolute;left:4px;right:4px;height:2px;z-index:3;
+  background:var(--vscode-focusBorder,#007fd4);pointer-events:none;
+}
+.list-item.drop-before::before{top:-1px}
+.list-item.drop-after::after{bottom:-1px}
 .list-item.selected{
   background:var(--vscode-list-activeSelectionBackground,#094771);
   color:var(--vscode-list-activeSelectionForeground,#fff);
 }
 .list-item.selected .item-meta{color:rgba(255,255,255,.65)}
+.drag-handle{
+  flex:0 0 10px;width:10px;overflow:hidden;cursor:grab;
+  color:var(--vscode-descriptionForeground,#858585);opacity:.45;font-size:15px;line-height:22px;
+}
+.drag-handle::before{content:'\\22ee\\22ee';display:block;transform:scaleX(.72);transform-origin:left center}
+.list-item:hover .drag-handle{opacity:.9}
+.list-item.dragging .drag-handle{cursor:grabbing}
 
 /* Thumbnail */
 .thumb-wrap{
@@ -107,7 +122,7 @@ body{
   background:repeating-conic-gradient(#333 0% 25%,#2a2a2a 0% 50%) 0 0/8px 8px;
   display:flex;align-items:center;justify-content:center;overflow:hidden;
 }
-.thumb-cv{display:block;image-rendering:pixelated}
+.thumb-cv{display:block;image-rendering:auto}
 
 /* Text info */
 .item-info{flex:1;min-width:0}
@@ -315,6 +330,7 @@ const vscode = acquireVsCodeApi();
 let images     = [];
 let activeTab  = 'locals';
 let selectedId = null;
+let draggedItemId = null;
 
 // Decode cache: id -> {src, w, h}  (src = HTMLImageElement or <canvas>)
 const decoded = new Map();
@@ -428,7 +444,15 @@ function buildListItem(imgData) {
   const item = document.createElement('div');
   item.className = 'list-item' + (imgData.id === selectedId ? ' selected' : '');
   item.dataset.id = imgData.id;
+  item.draggable = true;
+  item.setAttribute('aria-grabbed', 'false');
   item.addEventListener('click', () => selectImage(imgData.id));
+  attachListDragHandlers(item, imgData.id);
+
+  const dragHandle = document.createElement('span');
+  dragHandle.className = 'drag-handle';
+  dragHandle.title = 'Drag to reorder';
+  item.appendChild(dragHandle);
 
   // Thumbnail
   const tw = document.createElement('div');
@@ -461,7 +485,7 @@ function buildListItem(imgData) {
   if (imgData.isFile) {
     meta2.textContent = (imgData.mimeType || 'image').replace('image/', '').toUpperCase();
   } else if (imgData.channels > 0) {
-    meta2.textContent = imgData.channels + ' * UINT8';
+    meta2.textContent = imgData.channels + ' * ' + (imgData.dtype || 'uint8').toUpperCase();
   }
   if (imgData.typeInfo) {
     const t = imgData.typeInfo.length > 28 ? imgData.typeInfo.slice(0,26) + '...' : imgData.typeInfo;
@@ -475,6 +499,7 @@ function buildListItem(imgData) {
   // Remove button
   const del = document.createElement('button');
   del.className = 'item-del';
+  del.draggable = false;
   del.textContent = '\\u00d7';
   del.title = 'Remove';
   del.addEventListener('click', e => {
@@ -487,6 +512,81 @@ function buildListItem(imgData) {
   drawThumb(cv, imgData);
 
   return item;
+}
+
+function attachListDragHandlers(item, itemId) {
+  item.addEventListener('dragstart', e => {
+    if (e.target.closest('.item-del')) { e.preventDefault(); return; }
+    draggedItemId = itemId;
+    item.setAttribute('aria-grabbed', 'true');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', itemId);
+      const handle = item.querySelector('.drag-handle');
+      if (handle) { e.dataTransfer.setDragImage(handle, 5, 8); }
+    }
+    requestAnimationFrame(() => item.classList.add('dragging'));
+  });
+
+  item.addEventListener('dragover', e => {
+    if (!draggedItemId || draggedItemId === itemId) return;
+    e.preventDefault();
+    clearDropIndicators();
+    const rect = item.getBoundingClientRect();
+    item.classList.add(e.clientY < rect.top + rect.height / 2 ? 'drop-before' : 'drop-after');
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  });
+
+  item.addEventListener('dragleave', e => {
+    if (!item.contains(e.relatedTarget)) {
+      item.classList.remove('drop-before', 'drop-after');
+    }
+  });
+
+  item.addEventListener('drop', e => {
+    if (!draggedItemId || draggedItemId === itemId) return;
+    e.preventDefault();
+    const rect = item.getBoundingClientRect();
+    const insertBefore = e.clientY < rect.top + rect.height / 2;
+    const sourceId = draggedItemId;
+    finishListDrag();
+    reorderVisibleItems(sourceId, itemId, insertBefore);
+  });
+
+  item.addEventListener('dragend', finishListDrag);
+}
+
+function clearDropIndicators() {
+  imgList.querySelectorAll('.drop-before,.drop-after').forEach(el =>
+    el.classList.remove('drop-before', 'drop-after'));
+}
+
+function finishListDrag() {
+  draggedItemId = null;
+  clearDropIndicators();
+  imgList.querySelectorAll('.dragging').forEach(el => {
+    el.classList.remove('dragging');
+    el.setAttribute('aria-grabbed', 'false');
+  });
+}
+
+function reorderVisibleItems(sourceId, targetId, insertBefore) {
+  const orderedIds = visibleImages().map(item => item.id);
+  const sourceIndex = orderedIds.indexOf(sourceId);
+  if (sourceIndex < 0) return;
+  orderedIds.splice(sourceIndex, 1);
+
+  const targetIndex = orderedIds.indexOf(targetId);
+  if (targetIndex < 0) return;
+  orderedIds.splice(targetIndex + (insertBefore ? 0 : 1), 0, sourceId);
+
+  const order = new Map(orderedIds.map((id, index) => [id, index]));
+  const reorderedGroup = images.filter(item => order.has(item.id))
+    .sort((a, b) => order.get(a.id) - order.get(b.id));
+  let nextGroupItem = 0;
+  images = images.map(item => order.has(item.id) ? reorderedGroup[nextGroupItem++] : item);
+  renderList();
+  vscode.postMessage({ type: 'reorderVisualizations', orderedIds: orderedIds });
 }
 
 // ���� Thumbnail drawing ������������������������������������������������������������������������������������������������������������
@@ -503,6 +603,7 @@ function drawThumb(canvas, imgData) {
     const img = new Image();
     img.onload = () => {
       imgData.width = img.naturalWidth; imgData.height = img.naturalHeight; imgData.channels = 4;
+      imgData.dtype = 'uint8'; imgData.channelOrder = 'rgba';
       decoded.set(imgData.id, { src: img, w: img.naturalWidth, h: img.naturalHeight });
       blitTo(canvas, img, img.naturalWidth, img.naturalHeight, TW, TH);
       updateDimsLabel(imgData);
@@ -521,7 +622,10 @@ function blitTo(dst, src, sw, sh, tw, th) {
   const s = Math.min(tw / sw, th / sh);
   const dw = Math.round(sw * s), dh = Math.round(sh * s);
   dst.width = dw; dst.height = dh;
-  dst.getContext('2d').drawImage(src, 0, 0, dw, dh);
+  const ctx = dst.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, 0, 0, dw, dh);
 }
 
 function makeRawCanvas(imgData) {
@@ -529,7 +633,7 @@ function makeRawCanvas(imgData) {
   oc.width = imgData.width; oc.height = imgData.height;
   const ctx = oc.getContext('2d');
   const id2 = ctx.createImageData(imgData.width, imgData.height);
-  fillRgba(id2.data, b64ToU8(imgData.base64Data), imgData.channels);
+  fillRgba(id2.data, b64ToU8(imgData.base64Data), imgData.channels, imgData.channelOrder);
   ctx.putImageData(id2, 0, 0);
   return oc;
 }
@@ -603,6 +707,7 @@ function renderPreview(imgData) {
     const img = new Image();
     img.onload = () => {
       imgData.width = img.naturalWidth; imgData.height = img.naturalHeight; imgData.channels = 4;
+      imgData.dtype = 'uint8'; imgData.channelOrder = 'rgba';
       decoded.set(imgData.id, { src: img, w: img.naturalWidth, h: img.naturalHeight });
       updateDimsLabel(imgData);
       finalize(img, img.naturalWidth, img.naturalHeight);
@@ -702,7 +807,7 @@ function updatePixelOverlay() {
       ctx.fillRect(sx, sy, sw, sh);
 
       if (!showValues) continue;
-      const values = channels === 1 ? [r] : (channels === 4 ? [b, g, r, a] : [b, g, r]);
+      const values = pixelChannelValues(img, r, g, b, a);
       valueCells.push({ sx, sy, sw, sh, values });
     }
   }
@@ -797,7 +902,12 @@ previewPane.addEventListener('mousemove', e => {
     if (!img.isFile && img.channels === 1) {
       info = '(' + ix + ', ' + iy + ')   val = ' + p[0];
     } else {
-      info = '(' + ix + ', ' + iy + ')   B:' + p[2] + '  G:' + p[1] + '  R:' + p[0];
+      const order = img.channelOrder || 'bgr';
+      if (order === 'rgb' || order === 'rgba') {
+        info = '(' + ix + ', ' + iy + ')   R:' + p[0] + '  G:' + p[1] + '  B:' + p[2];
+      } else {
+        info = '(' + ix + ', ' + iy + ')   B:' + p[2] + '  G:' + p[1] + '  R:' + p[0];
+      }
       if (!img.isFile && img.channels === 4) info += '  A:' + p[3];
     }
     pixelBar.textContent  = info;
@@ -1174,14 +1284,7 @@ function applyHeatmap(src, w, h) {
 }
 
 // ���� Pixel fill helper ������������������������������������������������������������������������������������������������������������
-function fillRgba(px, raw, ch) {
-  const n = px.length >>> 2;
-  for (let i = 0; i < n; i++) {
-    if (ch === 1) { px[i*4]=px[i*4+1]=px[i*4+2]=raw[i]; px[i*4+3]=255; }
-    else if (ch === 3) { px[i*4]=raw[i*3+2]; px[i*4+1]=raw[i*3+1]; px[i*4+2]=raw[i*3]; px[i*4+3]=255; }
-    else if (ch === 4) { px[i*4]=raw[i*4+2]; px[i*4+1]=raw[i*4+1]; px[i*4+2]=raw[i*4]; px[i*4+3]=raw[i*4+3]; }
-  }
-}
+${getImageRendererHelpersScript()}
 
 function b64ToU8(b64) {
   const bin = atob(b64), out = new Uint8Array(bin.length);
